@@ -179,7 +179,51 @@ doc2.ExportAsFixedFormat(...)               # AttributeError: Open.ExportAsFixed
 
 ---
 
-## 12. 其他
+## 12. 页码常被包在内容控件 `<w:sdt>` 里
+
+Word 会自动把页脚页码包进结构化文档标签：
+
+```xml
+<w:ftr …>
+  <w:sdt><w:sdtContent>
+    <w:p><w:pPr><w:pStyle w:val="ab"/></w:pPr>
+      <w:r><w:fldChar w:fldCharType="begin"/></w:r>
+      <w:r><w:instrText>PAGE \* MERGEFORMAT</w:instrText></w:r>
+      <w:r><w:fldChar w:fldCharType="separate"/></w:r>
+      <w:r><w:t>2</w:t></w:r>          ← 缓存结果，也是 <w:t>
+      <w:r><w:fldChar w:fldCharType="end"/></w:r>
+    </w:p>
+  </w:sdtContent></w:sdt>
+  <w:p …/>                              ← SDT 之外还有一个空段落
+</w:ftr>
+```
+
+只替换「最后一个段落」会命中那个空段落，**SDT 里原有的页码原封不动**，
+于是同一页出现两个位置几乎重叠、字号还不一样的页码（视觉上像重影）。
+
+**正确做法：改页脚时整段重建整个 body**，保证有且只有一个页码：
+
+```python
+def set_footer(xml, page_number=False):
+    s, e = _content_bounds(xml)          # 开标签后 / 闭标签前
+    body = build_footer_page() if page_number else build_footer_empty()
+    return xml[:s] + body + xml[e:]
+```
+
+而**页眉**要相反——只替换「**最后一个含 `<w:t>` 的段落**」，
+保留前面的空占位段落。删掉它会让页眉变矮、正文可用高度变大、**页数变化**
+（实测同一文档会从 59 页变 57 页）。
+
+另外，删除 PAGE 域要按 `fldChar begin…end` **整体**删除（含中间的缓存结果
+run）。只删带 `fldChar`/`instrText` 的 run 会把缓存的数字留下来，
+变成一个写死的页码。
+
+同时提供 `--page-number` 时必须把**另一侧**的页码一并清掉，
+否则会出现"页眉一个、页脚一个"的同页双页码。
+
+---
+
+## 13. 其他
 
 - **改文件前先看占用**。文件被 Word/预览打开时写入报 `PermissionError`；
   可以先生成到临时目录再复制过去。

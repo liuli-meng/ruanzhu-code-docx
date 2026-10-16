@@ -34,12 +34,41 @@ def _paragraphs(xml):
             for m in re.finditer(r'<w:p\b[^>]*/>|<w:p\b[^>]*>.*?</w:p>', xml, re.S)]
 
 
-def _replace_last_paragraph(xml, new_p):
+def _content_bounds(xml):
+    """返回 (根标签结束位置, 根闭合标签起始位置)。"""
+    m = re.search(r'<(?:w:hdr|w:ftr)\b[^>]*>', xml)
+    if not m:
+        raise ValueError('不是 header/footer 部件')
+    c = re.search(r'</(?:w:hdr|w:ftr)>\s*$', xml)
+    end = c.start() if c else len(xml)
+    return m.end(), end
+
+
+def _run_start(xml, pos):
+    """pos 之前最近的 <w:r> / <w:r ...> 起始位置。"""
+    best = -1
+    for m in re.finditer(r'<w:r(?=[ >])', xml[:pos]):
+        best = m.start()
+    return best
+
+
+def _replace_last_text_paragraph(xml, new_p):
+    """替换**最后一个含文本的段落**，保留其前面的段落。
+
+    页眉里常有一个前置空段落撑高度，直接删会改变正文可用高度、进而改变页数；
+    只替换含文本的那段最安全。
+    """
     spans = _paragraphs(xml)
-    if not spans:
-        return xml.replace('</w:hdr>', new_p + '</w:hdr>').replace(
-            '</w:ftr>', new_p + '</w:ftr>')
-    s, e = spans[-1]
+    target = None
+    for s, e in reversed(spans):
+        if '<w:t' in xml[s:e]:
+            target = (s, e)
+            break
+    if target is None:
+        if not spans:
+            return xml
+        target = spans[-1]
+    s, e = target
     return xml[:s] + new_p + xml[e:]
 
 
@@ -85,19 +114,38 @@ def build_footer_page(font=DEFAULT_HF_FONT):
 
 
 def set_header(xml, name, body_width_twips, page_at_right=True):
-    return _replace_last_paragraph(
+    xml = strip_page_field(xml)          # 先清掉页眉里可能已有的页码域
+    return _replace_last_text_paragraph(
         xml, build_header(name, body_width_twips, page_at_right))
 
 
 def set_footer(xml, page_number=False):
-    return _replace_last_paragraph(
-        xml, build_footer_page() if page_number else build_footer_empty())
+    """整段重建页脚内容，**只留一个段落**。
+
+    不能只替换「最后一个段落」：Word 常把页码包在内容控件
+    `<w:sdt><w:sdtContent>…</w:sdtContent></w:sdt>` 里，这样会替换到
+    边上的空段落，原本的页码留在 SDT 中 → 同一页出现两个重叠的页码。
+    直接重建整个 body 才能保证有且只有一个页码。
+    """
+    s, e = _content_bounds(xml)
+    body = build_footer_page() if page_number else build_footer_empty()
+    return xml[:s] + body + xml[e:]
 
 
 def strip_page_field(xml):
-    """安全地移除页脚里的 PAGE 域（保留段落）。"""
-    xml = re.sub(r'<w:r>(?:(?!</w:r>).)*?<w:fldChar[^>]*/>(?:(?!</w:r>).)*?</w:r>', '', xml, flags=re.S)
-    xml = re.sub(r'<w:r>(?:(?!</w:r>).)*?<w:instrText[^>]*>(?:(?!</w:r>).)*?</w:r>', '', xml, flags=re.S)
+    """移除完整的 PAGE 域（begin…end，含中间的缓存结果 run）。"""
+    while True:
+        b = xml.find('fldCharType="begin"')
+        if b < 0:
+            break
+        e = xml.find('fldCharType="end"', b)
+        if e < 0:
+            break
+        rs = _run_start(xml, b)
+        re_end = xml.find('</w:r>', e)
+        if rs < 0 or re_end < 0:
+            break
+        xml = xml[:rs] + xml[re_end + 6:]
     return xml
 
 

@@ -151,35 +151,40 @@ def fix(inp, out, strip_texts=(), strip_dates=False, no_line_numbers=False,
     geo = C.page_geometry(doc)
     body_w = (geo['pw'] or 11906) - (geo['left'] or 1440) - (geo['right'] or 1440)
 
+    # 页眉 / 页脚。注意：page_number 指定的是「页码应该在哪儿」，
+    # 因此必须把**另一侧**的页码一并清掉，否则会出现同页两个页码。
+    hp = hfm['header'].get('default')
+    fp = hfm['footer'].get('default')
     if header_name:
-        hp = hfm['header'].get('default')
-        if not hp:
-            warn('模板没有默认页眉部件，无法写入软件名称')
-        else:
-            hx = parts[hp].decode('utf-8')
-            parts[hp] = hf.set_header(hx, header_name, body_w,
-                                      page_at_right=(page_number == 'header-right')
-                                      or page_number is None).encode('utf-8')
-            changes.append('页眉写入「%s」' % header_name)
+        hdr_name = header_name
+    elif hp:
+        hdr_name = (C.part_text(inp, hp) or '').strip()
+    else:
+        hdr_name = ''
+
+    if page_number and hp:
+        hx = parts[hp].decode('utf-8')
+        right = (page_number == 'header-right')
+        parts[hp] = hf.set_header(hx, hdr_name, body_w, page_at_right=right).encode('utf-8')
+        changes.append('页眉重建：%s（%s）'
+                       % (hdr_name, '含右上角页码' if right else '仅软件名，无页码'))
+    elif header_name and not hp:
+        warn('没有默认页眉部件，无法写入软件名称')
 
     if page_number == 'header-right':
-        hp = hfm['header'].get('default')
-        if hp:
-            name = header_name or (C.part_text(inp, hp) or '').strip()
-            hx = parts[hp].decode('utf-8')
-            parts[hp] = hf.set_header(hx, name, body_w, page_at_right=True).encode('utf-8')
-            changes.append('页码移至页眉右上角')
-            fp = hfm['footer'].get('default')
-            if fp:
-                parts[fp] = hf.set_footer(parts[fp].decode('utf-8'), page_number=False).encode('utf-8')
-                changes.append('清空页脚页码')
-        else:
-            warn('没有页眉部件，无法把页码放到右上角')
+        if fp:
+            parts[fp] = hf.set_footer(parts[fp].decode('utf-8'), page_number=False).encode('utf-8')
+            changes.append('清空页脚页码')
     elif page_number == 'footer-center':
-        fp = hfm['footer'].get('default')
         if fp:
             parts[fp] = hf.set_footer(parts[fp].decode('utf-8'), page_number=True).encode('utf-8')
-            changes.append('页码置于页脚居中')
+            changes.append('页脚居中放页码')
+        else:
+            warn('没有默认页脚部件，无法放置页码')
+    elif page_number == 'none':
+        if fp:
+            parts[fp] = hf.set_footer(parts[fp].decode('utf-8'), page_number=False).encode('utf-8')
+            changes.append('清空页脚页码')
 
     os.makedirs(os.path.dirname(os.path.abspath(out)) or '.', exist_ok=True)
 

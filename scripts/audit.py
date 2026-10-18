@@ -26,7 +26,7 @@ PATTERNS = [
     (r'[A-Za-z]:\\\\[^\s"\'<>]*', 'Windows 本地路径', 'WARN'),
     (r'(?:版权|版权所有|Copyright|\(c\)\s*\d{4})', '版权声明', 'WARN'),
     (r'@author|@Author|作者[：:]', '作者署名标记', 'WARN'),
-    (r'(?:仅供|内部资料|保密|机密)', '保密字样', 'WARN'),
+    (r'(?:仅供内部|内部资料|保密文件|机密|严禁外传)', '保密字样', 'WARN'),
     (r'sk-[A-Za-z0-9]{16,}', '疑似 API Key', 'WARN'),
     (r'Bearer\s+[A-Za-z0-9._-]{24,}', '疑似 Token', 'WARN'),
     (r'\bhttps?://[^\s"\'<>)},]+', 'URL', 'INFO'),
@@ -213,7 +213,6 @@ def audit(path, src_dir=None, use_word=True):
                     '规范：超过 60 页只提交【前 30 页 + 后 30 页】；不要靠缩页边距硬挤')
             if pdf and os.path.exists(pdf):
                 per = _pdf_lines_per_page(pdf, st['header_text'])
-                os.remove(pdf)
                 data['lines_per_page'] = per
                 low = [(i + 1, n) for i, n in enumerate(per) if n < 50]
                 low_strict = [p for p in low if p[0] != len(per)]
@@ -224,6 +223,25 @@ def audit(path, src_dir=None, use_word=True):
                     add('INFO', '末页 %d 行（结束页可少于 50 行）' % per[-1], '')
                 else:
                     add('INFO', '每页 %d~%d 行，全部达标' % (min(per), max(per)), '')
+
+                # 页码序列校验：第 i 页的页码必须等于 i
+                try:
+                    nums = _pdf_page_numbers(pdf)
+                    bad = [(i + 1, c) for i, c in enumerate(nums)
+                           if str(i + 1) not in c]
+                    data['page_numbers'] = nums
+                    if bad:
+                        add('FAIL', '有 %d 页页码显示错误' % len(bad),
+                            '例如第 %d 页应显示「%d」却显示 %s。'
+                            '常见原因：页码放在浮动文本框里，两位数被裁成一位，'
+                            '或页码域被写死成固定数字' %
+                            (bad[0][0], bad[0][0], bad[0][1]))
+                except Exception as e:
+                    add('INFO', '页码序列校验跳过：%s' % e, '')
+                try:
+                    os.remove(pdf)
+                except OSError:
+                    pass
             elif not pdf:
                 add('INFO', '未安装 pymupdf，跳过逐页行数核对',
                     'pip install pymupdf -i https://mirrors.aliyun.com/pypi/simple/')
@@ -293,6 +311,31 @@ def _pdf_lines_per_page(pdf_path, header_text):
         per.append(n)
     doc.close()
     return per
+
+
+def _pdf_page_numbers(pdf_path):
+    """取每页页眉/页脚区里的纯数字（页码候选），用于校验页码序列。"""
+    import pymupdf
+    d = pymupdf.open(pdf_path)
+    out = []
+    for page in d:
+        h = page.rect.height
+        cands = []
+        for blk in page.get_text('dict')['blocks']:
+            if blk['type'] != 0:
+                continue
+            for ln in blk['lines']:
+                y = ln['bbox'][1]
+                if not (y < 70 or y > h - 70):
+                    continue
+                if ln['bbox'][0] < 90:          # 左侧行号，不是页码
+                    continue
+                t = ''.join(sp['text'] for sp in ln['spans']).strip()
+                if re.fullmatch(r'\d+', t):
+                    cands.append(t)
+        out.append(cands)
+    d.close()
+    return out
 
 
 def render(issues, data):

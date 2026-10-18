@@ -32,22 +32,44 @@ def read_doc_xml(path):
 
 
 def extract_lines(doc_xml):
-    """把 document.xml 还原成逻辑行列表（含缩进的 \\t）。"""
+    """把 document.xml 还原成逻辑行列表（含缩进的 \\t）。
+
+    必须同时支持两种截然不同的排版方式——真实文档两种都遇到过：
+
+    A. 单段落 + 大量 `<w:br/>` 软换行（2625 个 br，1 个 <w:p>）
+    B. 每行一个真实段落（2663 个 <w:p>，0 个 br）
+
+    只处理 A 会把 B 整篇算成 1 行（实测一份 9.4 万字符的文档被判为"1 行"）。
+    """
     body = ET.fromstring(doc_xml).find(W + 'body')
     if body is None:
         raise ValueError('document.xml 里找不到 <w:body>')
-    lines, cur = [], []
-    for r in body.iter(W + 'r'):
-        for ch in r:
+
+    def walk(node, lines, cur):
+        """按文档顺序处理，遇到 br/cr 断行；跳过嵌套 <w:p>（由外层 iter 单独处理）。"""
+        for ch in node:
             tag = ch.tag.replace(W, '')
+            if tag == 'p':
+                continue
             if tag in ('br', 'cr'):
                 lines.append(''.join(cur))
-                cur = []
+                cur.clear()
             elif tag == 't':
                 cur.append(ch.text or '')
             elif tag == 'tab':
                 cur.append('\t')
-    lines.append(''.join(cur))
+            else:
+                walk(ch, lines, cur)
+
+    lines = []
+    for p in body.iter(W + 'p'):
+        cur = []
+        walk(p, lines, cur)
+        lines.append(''.join(cur))     # 段落边界 = 一次换行
+    if not lines:
+        cur = []
+        walk(body, lines, cur)
+        lines.append(''.join(cur))
     return lines
 
 

@@ -86,6 +86,37 @@ def remove_line_numbers(xml):
     return re.sub(r'<w:lnNumType[^>]*/>', '', xml), n
 
 
+def uniform_lines(xml):
+    """关闭全部段落的孤行控制（widowControl），让每页行数一致。
+
+    现象：每页本应 51 行，却有个别页只有 50 行。
+    根因：这些页末尾是**折行的长代码行**，Word 的「孤行控制」会把整段
+    （2 个视觉行）一起推到下一页，于是本页少一行、下一页多一行。
+    关掉 widowControl 后，折行可以自由跨页，每页行数就统一了。
+
+    实测：某 54 页文档 {50×2, 51×51} -> {51×53}（末页 33 行），页数不变。
+    注意：对代码清单来说断行跨页完全可接受，反而更整齐。
+
+    返回 (新 xml, 修改的段落数)。
+    """
+    cnt = [0]
+
+    def repl(m):
+        inner = m.group(1)
+        if 'widowControl' in inner:
+            return m.group(0)
+        cnt[0] += 1
+        ins = '<w:widowControl w:val="0"/>'
+        # 按 OOXML 的元素顺序，widowControl 应排在 spacing / ind / jc / rPr 之前
+        for anchor in ('<w:spacing', '<w:ind', '<w:jc', '<w:rPr>'):
+            i = inner.find(anchor)
+            if i >= 0:
+                return '<w:pPr>' + inner[:i] + ins + inner[i:] + '</w:pPr>'
+        return '<w:pPr>' + ins + inner + '</w:pPr>'
+
+    return re.sub(r'<w:pPr>(.*?)</w:pPr>', repl, xml, flags=re.S), cnt[0]
+
+
 def set_spacing(xml, pt):
     """设定正文段落的固定行距（twips = pt*20）。"""
     tw = int(round(pt * 20))
@@ -102,7 +133,7 @@ def set_spacing(xml, pt):
 
 def fix(inp, out, strip_texts=(), strip_dates=False, no_line_numbers=False,
         page_number=None, header_name=None, trim_blank=False,
-        line_spacing=None, fit_pages=None, verbose=True):
+        line_spacing=None, fit_pages=None, uniform=False, verbose=True):
     with zipfile.ZipFile(inp) as z:
         parts = {n: z.read(n) for n in z.namelist()}
     doc = parts[C.DOC_XML].decode('utf-8')
@@ -143,6 +174,10 @@ def fix(inp, out, strip_texts=(), strip_dates=False, no_line_numbers=False,
     if no_line_numbers:
         doc, n = remove_line_numbers(doc)
         changes.append('移除行号设置 %d 处' % n)
+
+    if uniform:
+        doc, n = uniform_lines(doc)
+        changes.append('关闭孤行控制（%d 个段落），每页行数统一' % n)
 
     parts[C.DOC_XML] = doc.encode('utf-8')
 
@@ -300,6 +335,8 @@ def main():
     ap.add_argument('--page-number', choices=['header-right', 'footer-center', 'keep'])
     ap.add_argument('--header-name', help='写入/覆盖页眉的软件名称')
     ap.add_argument('--trim-blank-lines', action='store_true')
+    ap.add_argument('--uniform-lines', action='store_true',
+                    help='关闭孤行控制，使每页行数一致（解决个别页少一行的折行问题）')
     ap.add_argument('--line-spacing', type=float, help='固定行距(pt)')
     ap.add_argument('--fit-pages', type=int,
                     help='自动反推行距，使总页数不超过该值且每页 >= 50 行')
@@ -312,7 +349,7 @@ def main():
         strip_dates=args.strip_date_comments, no_line_numbers=args.no_line_numbers,
         page_number=args.page_number, header_name=args.header_name,
         trim_blank=args.trim_blank_lines, line_spacing=args.line_spacing,
-        fit_pages=args.fit_pages)
+        fit_pages=args.fit_pages, uniform=args.uniform_lines)
     print('\n下一步：python audit.py "%s"' % args.out)
     return 0
 

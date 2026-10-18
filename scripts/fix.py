@@ -165,9 +165,19 @@ def fix(inp, out, strip_texts=(), strip_dates=False, no_line_numbers=False,
     if page_number and hp:
         hx = parts[hp].decode('utf-8')
         right = (page_number == 'header-right')
-        parts[hp] = hf.set_header(hx, hdr_name, body_w, page_at_right=right).encode('utf-8')
-        changes.append('页眉重建：%s（%s）'
-                       % (hdr_name, '含右上角页码' if right else '仅软件名，无页码'))
+        # 只在「需要动页眉」时才重建：
+        #   - 用户指定了 --header-name，或
+        #   - 页眉里确实有页码域需要清掉，或
+        #   - 目标是把页码放到页眉右上角
+        # 否则重建属于多余改动，会改掉原有的字体/字号（实测把宋体 10.5pt
+        # 改成了微软雅黑 8pt）。
+        need = bool(header_name) or right or ('fldCharType="begin"' in hx)
+        if need:
+            parts[hp] = hf.set_header(hx, hdr_name, body_w, page_at_right=right).encode('utf-8')
+            changes.append('页眉重建：%s（%s，保留原标题样式）'
+                           % (hdr_name, '含右上角页码' if right else '仅软件名，无页码'))
+        else:
+            changes.append('页眉未改动（本来就没有页码，保留原样式）')
     elif header_name and not hp:
         warn('没有默认页眉部件，无法写入软件名称')
 

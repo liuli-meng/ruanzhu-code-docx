@@ -72,10 +72,33 @@ def _replace_last_text_paragraph(xml, new_p):
     return xml[:s] + new_p + xml[e:]
 
 
+def _first_run_rpr(xml):
+    """取第一个含文本的 run 的 rPr，用于重建时**保持原标题样式**。
+
+    如果不复用，重建会把页眉改成默认的微软雅黑 8pt——
+    实测把一个原本宋体 10.5pt 的页眉改小了，属于不必要的改动。
+    """
+    for m in re.finditer(r'<w:r\b[^>]*>(.*?)</w:r>', xml, re.S):
+        body = m.group(1)
+        if '<w:t' not in body:
+            continue
+        r = re.search(r'<w:rPr>.*?</w:rPr>', body, re.S)
+        if r:
+            return r.group(0)
+    return None
+
+
 def build_header(name, body_width_twips, page_at_right=True,
-                 font=DEFAULT_HF_FONT, bottom_border=True):
-    """软件名居中（+ 页码右上），单段落、单行。"""
-    r = '<w:rPr>%s</w:rPr>' % font
+                 rpr=None, bottom_border=True):
+    """软件名居中（+ 页码右上），单段落、单行。
+
+    rpr: 完整 `<w:rPr>…</w:rPr>` 字符串。传原文的 rPr 可保持原标题样式
+    （字体/字号/加粗）；传 None 用默认微软雅黑 8pt。
+    复用原 rPr 很重要——否则会把宋体 10.5pt 的页眉改成微软雅黑 8pt。
+    """
+    r = rpr if (rpr and rpr.lstrip().startswith('<w:rPr')) \
+        else '<w:rPr>%s</w:rPr>' % (rpr or DEFAULT_HF_FONT)
+    ppr_rpr = r
     tabs = ''
     inner = ''
     if page_at_right:
@@ -93,7 +116,7 @@ def build_header(name, body_width_twips, page_at_right=True,
         border = ('<w:pBdr><w:bottom w:val="single" w:sz="1" w:space="1" '
                   'w:color="000000"/></w:pBdr>')
 
-    parts = ['<w:p><w:pPr>', border, tabs, '<w:rPr>%s</w:rPr>' % font, '</w:pPr>',
+    parts = ['<w:p><w:pPr>', border, tabs, ppr_rpr, '</w:pPr>',
              inner,
              '<w:r>%s<w:t xml:space="preserve">%s</w:t></w:r>' % (r, _esc(name))]
     if page_at_right:
@@ -114,9 +137,13 @@ def build_footer_page(font=DEFAULT_HF_FONT):
 
 
 def set_header(xml, name, body_width_twips, page_at_right=True):
-    xml = strip_page_field(xml)          # 先清掉页眉里可能已有的页码域
+    """重建页眉：保留原标题样式（rPr）与是否带下框线的设定。"""
+    rpr = _first_run_rpr(xml)
+    border = '<w:pBdr>' in xml
+    xml = strip_page_field(xml)
     return _replace_last_text_paragraph(
-        xml, build_header(name, body_width_twips, page_at_right))
+        xml, build_header(name, body_width_twips, page_at_right,
+                          rpr=rpr, bottom_border=border))
 
 
 def set_footer(xml, page_number=False):

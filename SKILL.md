@@ -78,6 +78,7 @@ python scripts/fix.py <输入.docx> --out <输出.docx> \
     --strip-text "someone@qq.com" \
     --strip-date-comments \
     --no-line-numbers --page-number header-right --trim-blank-lines \
+    --font 宋体 --font-size 10.5 --tab-chars 2 \
     --fit-pages 60
 ```
 
@@ -87,6 +88,12 @@ python scripts/fix.py <输入.docx> --out <输出.docx> \
   这是解决「固定行距后页数变化」的正规做法。想留安全余量就用 `--fit-pages 58`。
 - `--page-number header-right` 把页码移到页眉右上角并清空页脚。
 - `--line-spacing 13.5` 直接指定行距（会改变页数，通常改用 `--fit-pages`）。
+- `--font 宋体 --font-size 10.5`：把正文（含页眉页脚）统一成宋体五号。
+  `w:sz` / `w:szCs` / `w:rFonts` 四处一起改，只改一处换软件就变形。
+- `--tab-chars 2`：**字号从 8pt 改到五号时几乎必用**。中文 Word 的默认制表位
+  是每 4 个字符一跳，字号翻倍后 12 个 tab 就从 384pt 涨到 504pt，直接把整行挤爆，
+  Word 会把那排 tab 变成一个空行、正文掉到下一行左侧 → 每页凭空少 3~5 行，
+  跌破 50 行。固定成 2 字符一个制表位即可（详见 `references/ooxml-pitfalls.md` 第 14 条）。
 
 修复后**务必再跑一次 `audit.py` 复检**。
 

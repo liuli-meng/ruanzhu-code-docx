@@ -49,7 +49,9 @@ def extract_lines(doc_xml):
         """按文档顺序处理，遇到 br/cr 断行；跳过嵌套 <w:p>（由外层 iter 单独处理）。"""
         for ch in node:
             tag = ch.tag.replace(W, '')
-            if tag == 'p':
+            # pPr / rPr / tabs 里也有 <w:tab/>，但那是**制表位定义**，不是缩进！
+            # 不跳过会把每行都算成被 20 多个 tab 缩进（实测把首行污染成 24 个 \t）。
+            if tag in ('p', 'pPr', 'rPr', 'tabs', 'sectPr'):
                 continue
             if tag in ('br', 'cr'):
                 lines.append(''.join(cur))
@@ -135,14 +137,34 @@ def header_footer_map(path):
         rels = z.read('word/_rels/document.xml.rels').decode('utf-8')
         settings = z.read('word/settings.xml').decode('utf-8')
 
-    rid2target = dict(re.findall(r'Id="(rId\d+)"[^>]*Target="([^"]+)"', rels))
+    # 注意：不能写死 Id="rId\d+"——WPS / 部分导出工具用的是
+    # Id="R06a528e9d55b4015" 这种非标准 rId。写死会导致映射为空，
+    # 于是「页眉明明有软件名」却被体检判成「页眉为空 / 找不到页码域」。
+    # 属性顺序也不保证，逐条 Relationship 单独取 Id / Target 最稳。
+    rid2target = {}
+    for attrs in re.findall(r'<Relationship\b([^>]*?)/?>', rels):
+        mid = re.search(r'\bId="([^"]+)"', attrs)
+        mtg = re.search(r'\bTarget="([^"]+)"', attrs)
+        if mid and mtg:
+            rid2target[mid.group(1)] = mtg.group(1)
     out = {'header': {}, 'footer': {}}
-    for m in re.finditer(r'<w:(header|footer)Reference w:type="(\w+)" r:id="(rId\d+)"/>', doc):
-        kind, typ, rid = m.group(1), m.group(2), m.group(3)
-        target = rid2target.get(rid)
-        if target and not target.startswith('/'):
-            target = 'word/' + target.lstrip('/')
-        out[kind][typ] = target
+    # 同样不能写死 r:id="rId\d+"，也不能假定属性顺序 / 没有多余空格
+    # （WPS 导出常见 `<w:headerReference w:type="default" r:id="Rxxx" />`）
+    for m in re.finditer(r'<w:(header|footer)Reference\b([^>]*?)/?>', doc):
+        kind, attrs = m.group(1), m.group(2)
+        typ = re.search(r'w:type="([^"]+)"', attrs)
+        rid = re.search(r'r:id="([^"]+)"', attrs)
+        if not (typ and rid):
+            continue
+        target = rid2target.get(rid.group(1))
+        if target:
+            # Target 有三种写法：'header1.xml'（相对 word/）、
+            # '/word/header1.xml'（包内绝对路径）。统一归一化成 zip 里的路径，
+            # 否则读部件时 KeyError → 又被判成「页眉为空」。
+            target = target.lstrip('/')
+            if not target.startswith('word/'):
+                target = 'word/' + target
+            out[kind][typ.group(1)] = target
     out['evenAndOddHeaders'] = '<w:evenAndOddHeaders' in settings
     out['titlePg'] = '<w:titlePg' in doc
     return out

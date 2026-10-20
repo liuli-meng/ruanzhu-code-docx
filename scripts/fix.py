@@ -117,23 +117,96 @@ def uniform_lines(xml):
     return re.sub(r'<w:pPr>(.*?)</w:pPr>', repl, xml, flags=re.S), cnt[0]
 
 
+def set_tabs(xml, tab_twips, count=24):
+    """把段落制表位固定成指定宽度（twips 一个制表位）。
+
+    为什么需要：这类源码文档的缩进是 `<w:tab/>`，而中文 Word 的**默认制表位
+    是每 4 个字符一跳**。8pt 时 12 个 tab 只占 384pt（放得下），
+    换成五号 10.5pt 就变成 504pt——直接顶满整行，Word 会把这一排 tab
+    挤成**一个空行**，正文反而掉到下一行左侧。表现为每页凭空少掉几行，
+    跌破「每页 50 行」，且肉眼看上去是诡异的空白块。
+    显式给每 2 个字符一个制表位，缩进比例与 8pt 时基本一致，也不会再挤爆。
+    """
+    tabs = '<w:tabs>%s</w:tabs>' % ''.join(
+        '<w:tab w:val="left" w:pos="%d"/>' % int(tab_twips * (i + 1))
+        for i in range(count))
+    xml = re.sub(r'<w:tabs>.*?</w:tabs>', '', xml, flags=re.S)
+    m = re.search(r'<w:pPr\b[^>]*?/>', xml)
+    if m:                                    # 自闭合 pPr → 展开
+        head, tail = xml[:m.start()], xml[m.end():]
+        return head + '<w:pPr>%s</w:pPr>' % tabs + tail
+    m = re.search(r'<w:pPr\b[^>]*>', xml)
+    if not m:
+        return xml
+    # tabs 在 pPr 里必须排在 spacing / ind / jc / rPr 之前
+    return xml[:m.end()] + tabs + xml[m.end():]
+
+
 def set_spacing(xml, pt):
-    """设定正文段落的固定行距（twips = pt*20）。"""
+    """设定正文段落的固定行距（twips = pt*20）。
+
+    注意：段落属性常被写成自闭合的 `<w:pPr />`（从 HTML/文本导入的软著文档
+    几乎都是这样，正文只有 1 个段落）。原实现只找 `<w:pPr>`，
+    遇到自闭合写法会**静默不改**——行距没生效，页数自然也不会变。
+    """
     tw = int(round(pt * 20))
     new_sp = ('<w:spacing w:before="0" w:after="0" w:line="%d" w:lineRule="exact"/>' % tw)
     xml = re.sub(r'<w:spacing[^>]*w:line="\d+"[^>]*w:lineRule="exact"\s*/>', '', xml)
-    if '<w:pPr>' in xml:
-        j = xml.find('<w:rPr>', xml.find('<w:pPr>'))
-        if j > 0:
-            return xml[:j] + new_sp + xml[j:]
-    return xml
+
+    # 自闭合 <w:pPr ... />：直接展开成带 spacing 的完整 pPr
+    m = re.search(r'<w:pPr\b([^>]*?)\s*/>', xml)
+    if m:
+        head, tail = xml[:m.start()], xml[m.end():]
+        return head + '<w:pPr%s>%s</w:pPr>' % (m.group(1), new_sp) + tail
+
+    m = re.search(r'<w:pPr\b[^>]*>', xml)
+    if not m:
+        return xml
+    inner_start = m.end()
+    inner_end = xml.find('</w:pPr>', inner_start)
+    if inner_end < 0:
+        return xml
+    inner = xml[inner_start:inner_end]
+    # spacing 的合法位置：pBdr / tabs / shd 之后，ind / jc / rPr 之前
+    for anchor in ('<w:ind', '<w:jc', '<w:rPr>'):
+        i = inner.find(anchor)
+        if i >= 0:
+            return xml[:inner_start] + inner[:i] + new_sp + inner[i:] + xml[inner_end:]
+    return xml[:inner_start] + inner + new_sp + xml[inner_end:]
+
+
+# 注意 `<w:sz` 后面必须紧跟空白或 / >，否则会连 `<w:szCs` 一起吃进去
+_SZ = r'<w:sz(?=[\s/>])[^>]*?(?:/>|>\s*</w:sz>)'
+_SZCS = r'<w:szCs(?=[\s/>])[^>]*?(?:/>|>\s*</w:szCs>)'
+_RFONTS = r'<w:rFonts\b[^>]*?(?:/>|>\s*</w:rFonts>)'
+
+
+def set_font(xml, font, size_pt=None):
+    """统一字体 / 字号。返回 (新 xml, {改动统计})。
+
+    size_pt 用磅；写进 XML 时 ×2（半磅）。`w:sz` 与 `w:szCs` 都要写，
+    只写一个在换软件/换打印驱动时会变形。
+    """
+    stat = {}
+    if font:
+        new = ('<w:rFonts w:ascii="%s" w:hAnsi="%s" w:cs="%s" w:eastAsia="%s"/>'
+               % ((font,) * 4))
+        xml, stat['rFonts'] = re.subn(_RFONTS, new, xml)
+    if size_pt:
+        half = int(round(size_pt * 2))
+        xml, n1 = re.subn(_SZ, '<w:sz w:val="%d"/>' % half, xml)
+        xml, n2 = re.subn(_SZCS, '<w:szCs w:val="%d"/>' % half, xml)
+        stat['sz'] = n1
+        stat['szCs'] = n2
+    return xml, stat
 
 
 # ------------------------------------------------------------ 主流程
 
 def fix(inp, out, strip_texts=(), strip_dates=False, no_line_numbers=False,
         page_number=None, header_name=None, trim_blank=False,
-        line_spacing=None, fit_pages=None, uniform=False, verbose=True):
+        line_spacing=None, fit_pages=None, uniform=False, font=None,
+        font_size=None, tab_chars=None, verbose=True):
     with zipfile.ZipFile(inp) as z:
         parts = {n: z.read(n) for n in z.namelist()}
     doc = parts[C.DOC_XML].decode('utf-8')
@@ -148,6 +221,19 @@ def fix(inp, out, strip_texts=(), strip_dates=False, no_line_numbers=False,
     if line_spacing:
         doc = set_spacing(doc, line_spacing)
         changes.append('固定行距 %.1fpt' % line_spacing)
+
+    if tab_chars and font_size:
+        tw = int(round(tab_chars * font_size * 20))
+        doc = set_tabs(doc, tw)
+        changes.append('制表位固定为 %g 字符（%d twips），避免缩进把整行挤爆'
+                       % (tab_chars, tw))
+
+    if font or font_size:
+        doc, st = set_font(doc, font, font_size)
+        changes.append('统一正文字体 %s%s（rFonts %d 处 / sz %d 处 / szCs %d 处）'
+                       % (font or '（不变）',
+                          ' %gpt' % font_size if font_size else '',
+                          st.get('rFonts', 0), st.get('sz', 0), st.get('szCs', 0)))
 
     for s in strip_texts:
         doc, n = replace_in_texts(doc, s, '')
@@ -232,6 +318,15 @@ def fix(inp, out, strip_texts=(), strip_dates=False, no_line_numbers=False,
             changes.append('清空页脚页码')
 
     os.makedirs(os.path.dirname(os.path.abspath(out)) or '.', exist_ok=True)
+
+    # 页眉/页脚里的软件名、页码也统一字体（否则会出现「正文宋体五号、
+    # 页眉微软雅黑 8pt」的混搭）。放在页眉页脚重建之后执行。
+    if font or font_size:
+        for name in list(parts):
+            if not re.match(r'^word/(header|footer)\d*\.xml$', name):
+                continue
+            x, st = set_font(parts[name].decode('utf-8'), font, font_size)
+            parts[name] = x.encode('utf-8')
 
     # 自动反推行距，保证页数不超过 fit_pages 且每页 >= 50 行
     if fit_pages:
@@ -338,6 +433,12 @@ def main():
     ap.add_argument('--uniform-lines', action='store_true',
                     help='关闭孤行控制，使每页行数一致（解决个别页少一行的折行问题）')
     ap.add_argument('--line-spacing', type=float, help='固定行距(pt)')
+    ap.add_argument('--font', help='统一正文字体（含页眉页脚），如 宋体')
+    ap.add_argument('--font-size', type=float,
+                    help='统一正文字号(pt)，软著源码文档一般为 10.5（五号）')
+    ap.add_argument('--tab-chars', type=float,
+                    help='把 <w:tab/> 制表位固定成 N 个字符宽（常用 2）。'
+                         '字号调大后缩进会挤爆整行、每页凭空少行，用这个修')
     ap.add_argument('--fit-pages', type=int,
                     help='自动反推行距，使总页数不超过该值且每页 >= 50 行')
     args = ap.parse_args()
@@ -349,7 +450,8 @@ def main():
         strip_dates=args.strip_date_comments, no_line_numbers=args.no_line_numbers,
         page_number=args.page_number, header_name=args.header_name,
         trim_blank=args.trim_blank_lines, line_spacing=args.line_spacing,
-        fit_pages=args.fit_pages, uniform=args.uniform_lines)
+        fit_pages=args.fit_pages, uniform=args.uniform_lines,
+        font=args.font, font_size=args.font_size, tab_chars=args.tab_chars)
     print('\n下一步：python audit.py "%s"' % args.out)
     return 0
 
